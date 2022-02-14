@@ -106,7 +106,7 @@ static void remote_task(__attribute__((unused)) void* params) {
 
 void button_a_click_handler(void* _handler_arg, esp_event_base_t _base, int32_t _id, void* _event_data) {
 //  stopLedFlash();
-//  display_msg("A");
+  display_msg("OPEN");
   if (xQueueSend(nowSendQueue, "OPEN", portMAX_DELAY) != pdTRUE) {
     ESP_LOGW(TAG, "nowSendQueue failed");
   }

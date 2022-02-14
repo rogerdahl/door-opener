@@ -27,16 +27,16 @@
 #define ESPNOW_MAXDELAY       512
 #define ESP_INTR_FLAG_DEFAULT 0
 
-static volatile bool pir_inside  = false;
-static volatile bool pir_outside = false;
-static volatile bool remote_open = false;
+// static volatile bool pir_inside  = false;
+// static volatile bool pir_outside = false;
+// static volatile bool remote_open = false;
 
 static const char* TAG = "main";
 
 static void main_task(void* pvParameter);
 static void remote_task(void* pvParameter);
 
-void        init_pir();
+void init_pir();
 
 void init_relays();
 
@@ -48,7 +48,7 @@ void init_beep();
 
 void beep(u32 duration_ms);
 
-void gpio_isr_pir_handler(void* pir_num_in);
+void gpio_isr_pir_handler(void* trigger);
 
 void print_chip_info();
 
@@ -72,7 +72,14 @@ typedef char Msg[32];
 
 typedef char SendStatusMsg[32];
 // char[32] sendStatus;
-QueueHandle_t sendStatusQueueHandle = xQueueCreate(32, sizeof(SendStatusMsg));
+// QueueHandle_t sendStatusQueueHandle = xQueueCreate(32, sizeof(SendStatusMsg));
+enum Trigger {
+  PIR_INSIDE,
+  PIR_OUTSIDE,
+  REMOTE,
+};
+// typedef char TriggerMsg[32];
+QueueHandle_t triggerQueue = xQueueCreate(32, sizeof(Trigger));
 
 static QueueHandle_t nowSendQueue;
 static QueueHandle_t nowRecvQueue;
@@ -99,63 +106,62 @@ void app_main() {
 
 static void main_task(void* pvParameter) {
   // espnow_send_param_t* send_param = (espnow_send_param_t*)pvParameter;
-  Msg msg;
-
+  //  Msg msg;
+  char* msg = nullptr;
   //  vTaskDelay(pdMS_TO_TICKS(5000));
 
   while (true) {
-    snprintf(msg, sizeof(Msg), "<no msg>");
+    //    snprintf(msg, sizeof(Msg), "<no msg>");
+    //    TriggerMsg msg;
+    Trigger trigger;
+    xQueueReceive(triggerQueue, &trigger, portMAX_DELAY);
 
-    if (pir_inside || pir_outside || remote_open) {
-      if (pir_inside) {
-        snprintf(msg, sizeof(Msg), "PIR inside");
-        pir_inside  = false;
-      }
-      if (pir_outside) {
-        snprintf(msg, sizeof(Msg), "PIR outside");
-        pir_outside = false;
-      }
-      if (remote_open) {
-        snprintf(msg, sizeof(Msg), "Remote open");
-        remote_open = false;
-      }
-
-      ESP_LOGI(TAG,"%s", msg);
-
-      if (!xSemaphoreTake(ignoreFalseTrigger, 0)) {
-        ESP_LOGI(TAG, "PIR ignored: Probably triggered by relays");
-        continue;
-      }
-
-      xSemaphoreGive(ignoreFalseTrigger);
-
-      // beep(30);
-      trigger_open();
-
-      ESP_LOGI(TAG, "Door has been opened %d times", get_door_opened_counter());
-
-      if (xQueueSend(nowSendQueue, msg, portMAX_DELAY) != pdTRUE) {
-        ESP_LOGW(TAG, "nowSendQueue failed");
-      }
-
-      // ESP_LOGI(TAG, "Sending: %d", det);
-      // if (esp_now_send(send_param->dest_mac, (u8*)msg, sizeof(Msg)) != ESP_OK) {
-      //   ESP_LOGE(TAG, "Send error");
-      //   espnow_deinit(send_param);
-      //   vTaskDelete(nullptr);
-      // }
+    switch (trigger) {
+    case Trigger::PIR_INSIDE:
+      msg = "PIR inside";
+      break;
+    case Trigger::PIR_OUTSIDE:
+      msg = "PIR outside";
+      break;
+    case Trigger::REMOTE:
+      msg = "Remote";
+      break;
+    default:
+      msg = "ERR";
+      break;
     }
 
-    vTaskDelay(100 / portTICK_RATE_MS);
+    ESP_LOGI(TAG, "Trigger: %s", msg);
+
+    if (!xSemaphoreTake(ignoreFalseTrigger, 0)) {
+      ESP_LOGI(TAG, "PIR ignored: Probably triggered by relays");
+      continue;
+    }
+
+    xSemaphoreGive(ignoreFalseTrigger);
+
+    // beep(30);
+    trigger_open();
+
+    ESP_LOGI(TAG, "Door has been opened %d times", get_door_opened_counter());
+
+    if (xQueueSend(nowSendQueue, msg, portMAX_DELAY) != pdTRUE) {
+      ESP_LOGW(TAG, "nowSendQueue failed");
+    }
   }
 }
+
 
 static void remote_task(__attribute__((unused)) void* params) {
   Msg msg;
   while (true) {
-   xQueueReceive(nowRecvQueue, &msg, portMAX_DELAY);
-   ESP_LOGI(TAG, "Received from remote: %s", msg);
-   trigger_open();
+    xQueueReceive(nowRecvQueue, &msg, portMAX_DELAY);
+    ESP_LOGI(TAG, "Received from remote: %s", msg);
+    int i = Trigger::REMOTE;
+    // Trigger::REMOTE
+    if (xQueueSend(triggerQueue, (void*)&i, portMAX_DELAY) != pdTRUE) {
+      ESP_LOGE(TAG, "triggerQueue failed");
+    }
   }
 }
 
@@ -211,18 +217,23 @@ void init_pir() {
   // install gpio isr service
   gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
   // hook isr handler for specific gpio pin
-  gpio_isr_handler_add(GPIO_NUM_PIR_INSIDE, gpio_isr_pir_handler, (void*)1);
-  gpio_isr_handler_add(GPIO_NUM_PIR_OUTSIDE, gpio_isr_pir_handler, (void*)2);
+  gpio_isr_handler_add(GPIO_NUM_PIR_INSIDE, gpio_isr_pir_handler, (void*)Trigger::PIR_INSIDE);
+  gpio_isr_handler_add(GPIO_NUM_PIR_OUTSIDE, gpio_isr_pir_handler, (void*)Trigger::PIR_OUTSIDE);
 }
 
-void gpio_isr_pir_handler(void* pir_num_in) {
-  int pir = (int)pir_num_in;
-  if (pir == 1) {
-    pir_inside = true;
-  }
-  if (pir == 2) {
-    pir_outside = true;
-  }
+void gpio_isr_pir_handler(void* trigger) {
+  BaseType_t task_woken = pdFALSE;
+  // Noise from relays causes lots of false trigger interrupts. We ignore them by
+  // allowing just one item in the queue.
+  xQueueReset(triggerQueue);
+  // TODO: xQueueSend requires an address that it can copy from, and it's not possible
+  // to take the address of an enum directly. So we copy it to an int and take the
+  // address of that. There's probably a nicer way...
+  int i = (int)trigger;
+  xQueueSendFromISR(triggerQueue, (void*)&i, &task_woken);
+  //  if (xQueueSendFromISR(triggerQueue, (void*)trigger) != pdTRUE) {
+//    ESP_LOGE(TAG, "triggerQueue failed");
+//  }
 }
 
 // relays
